@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
+// Copyright (c) 2017 The NavCoin developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -16,7 +17,7 @@
 #include "main.h"
 #include "net.h"
 #include "policy/policy.h"
-#include "pow.h"
+#include "pos.h"
 #include "primitives/transaction.h"
 #include "script/standard.h"
 #include "timedata.h"
@@ -24,6 +25,8 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
+#include "wallet/wallet.h"
+#include "kernel.h"
 
 #include <algorithm>
 #include <boost/thread.hpp>
@@ -34,7 +37,7 @@ using namespace std;
 
 //////////////////////////////////////////////////////////////////////////////
 //
-// BitcoinMiner
+// BitcoinStaker
 //
 
 //
@@ -46,6 +49,7 @@ using namespace std;
 uint64_t nLastBlockTx = 0;
 uint64_t nLastBlockSize = 0;
 uint64_t nLastBlockWeight = 0;
+uint64_t nLastCoinStakeSearchInterval = 0;
 
 class ScoreCompare
 {
@@ -68,7 +72,7 @@ int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParam
 
     // Updating time can change work required on testnet:
     if (consensusParams.fPowAllowMinDifficultyBlocks)
-        pblock->nBits = GetNextWorkRequired(pindexPrev, pblock, consensusParams);
+        pblock->nBits = GetNextTargetRequired(pindexPrev, true);
 
     return nNewTime - nOldTime;
 }
@@ -122,7 +126,7 @@ void BlockAssembler::resetBlock()
     blockFinished = false;
 }
 
-CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
+CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, bool fProofOfStake, uint64_t* pFees)
 {
     resetBlock();
 
@@ -144,10 +148,11 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     pblock->nVersion = ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
-    if (chainparams.MineBlocksOnDemand())
-        pblock->nVersion = GetArg("-blockversion", pblock->nVersion);
+    // if (chainparams.MineBlocksOnDemand())
+    //     pblock->nVersion = GetArg("-blockversion", pblock->nVersion);
 
     pblock->nTime = GetAdjustedTime();
+
     const int64_t nMedianTimePast = pindexPrev->GetMedianTimePast();
 
     nLockTimeCutoff = (STANDARD_LOCKTIME_VERIFY_FLAGS & LOCKTIME_MEDIAN_TIME_PAST)
@@ -162,37 +167,48 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
     // transaction (which in most cases can be a no-op).
     fIncludeWitness = IsWitnessEnabled(pindexPrev, chainparams.GetConsensus());
 
-    addPriorityTxs();
+    addPriorityTxs(fProofOfStake, pblock->vtx[0].nTime);
     addPackageTxs();
 
     nLastBlockTx = nBlockTx;
     nLastBlockSize = nBlockSize;
     nLastBlockWeight = nBlockWeight;
-    LogPrintf("CreateNewBlock(): total size %u txs: %u fees: %ld sigops %d\n", nBlockSize, nBlockTx, nFees, nBlockSigOpsCost);
+    // LogPrint("coinstake","CreateNewBlock(): total size %u txs: %u fees: %ld sigops %d\n", nBlockSize, nBlockTx, nFees, nBlockSigOpsCost);
 
     // Create coinbase transaction.
-    CMutableTransaction coinbaseTx;
-    coinbaseTx.vin.resize(1);
-    coinbaseTx.vin[0].prevout.SetNull();
-    coinbaseTx.vout.resize(1);
-    coinbaseTx.vout[0].scriptPubKey = scriptPubKeyIn;
-    coinbaseTx.vout[0].nValue = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
-    coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
-    pblock->vtx[0] = coinbaseTx;
+    CMutableTransaction coinstakeTx;
+    coinstakeTx.vin.resize(1);
+    coinstakeTx.vin[0].prevout.SetNull();
+    coinstakeTx.vout.resize(1);
+    coinstakeTx.vout[0].scriptPubKey.clear(); // = scriptPubKeyIn;
+    if (!fProofOfStake)
+        coinstakeTx.vout[0].nValue = nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus());
+    else
+        coinstakeTx.vout[0].nValue = 0;
+    coinstakeTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
+
+    pblock->vtx[0] = CTransaction(coinstakeTx);
+
     pblocktemplate->vchCoinbaseCommitment = GenerateCoinbaseCommitment(*pblock, pindexPrev, chainparams.GetConsensus());
     pblocktemplate->vTxFees[0] = -nFees;
 
+
     // Fill in header
     pblock->hashPrevBlock  = pindexPrev->GetBlockHash();
-    UpdateTime(pblock, chainparams.GetConsensus(), pindexPrev);
-    pblock->nBits          = GetNextWorkRequired(pindexPrev, pblock, chainparams.GetConsensus());
+    if (!fProofOfStake)
+        UpdateTime(pblock, chainparams.GetConsensus(), pindexPrev);
+    pblock->nBits          = fProofOfStake ? GetNextTargetRequired(pindexPrev, true) : GetNextWorkRequired(pindexPrev, pblock, chainparams.GetConsensus());
     pblock->nNonce         = 0;
+    pblock->nVersion       = 0x7;
     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(pblock->vtx[0]);
 
     CValidationState state;
-    if (!TestBlockValidity(state, chainparams, *pblock, pindexPrev, false, false)) {
+    if (!TestBlockValidity(state, chainparams, *pblock, pindexPrev, false, false, false)) {
         throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, FormatStateMessage(state)));
     }
+
+    if (pFees)
+      *pFees = nFees;
 
     return pblocktemplate.release();
 }
@@ -505,7 +521,7 @@ void BlockAssembler::addPackageTxs()
     }
 }
 
-void BlockAssembler::addPriorityTxs()
+void BlockAssembler::addPriorityTxs(bool fProofOfStake, int blockTime)
 {
     // How much of the block should be dedicated to high-priority transactions,
     // included regardless of the fees they pay
@@ -552,6 +568,9 @@ void BlockAssembler::addPriorityTxs()
 
         // cannot accept witness transactions into a non-witness block
         if (!fIncludeWitness && !iter->GetTx().wit.IsNull())
+            continue;
+
+        if ((fProofOfStake && iter->GetTx().nTime > (unsigned int)blockTime))
             continue;
 
         // If tx is dependent on other mempool txs which haven't yet been included
@@ -604,4 +623,245 @@ void IncrementExtraNonce(CBlock* pblock, const CBlockIndex* pindexPrev, unsigned
 
     pblock->vtx[0] = txCoinbase;
     pblock->hashMerkleRoot = BlockMerkleRoot(*pblock);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+//
+// Internal Staker
+//
+
+// static bool ProcessBlockFound(const CBlock* pblock, const CChainParams& chainparams)
+// {
+//     LogPrintf("%s\n", pblock->ToString());
+//     // LogPrintf("generated %s\n", FormatMoney(pblock->vtx[0].vout[0].nValue));
+//
+//     // Found a solution
+//     {
+//         LOCK(cs_main);
+//         if (pblock->hashPrevBlock != chainActive.Tip()->GetBlockHash())
+//             return error("NavCoinStaker: generated block is stale");
+//     }
+//
+//     // Inform about the new block
+//     GetMainSignals().BlockFound(pblock->GetHash());
+//
+//     // Process this block the same as if we had received it from another node
+//     CValidationState state;
+//     if (!ProcessNewBlock(state, chainparams, NULL, pblock, true, NULL))
+//         return error("NavCoinStaker: ProcessNewBlock, block not accepted");
+//
+//     return true;
+// }
+
+extern unsigned int nMinerSleep;
+
+void static NavCoinStaker(const CChainParams& chainparams)
+{
+    LogPrintf("NavCoinStaker started\n");
+    SetThreadPriority(THREAD_PRIORITY_LOWEST);
+    RenameThread("navcoin-staker");
+
+    boost::shared_ptr<CReserveScript> coinbaseScript;
+    GetMainSignals().ScriptForMining(coinbaseScript);
+
+    try {
+        // Throw an error if no script was provided.  This can happen
+        // due to some internal error but also if the keypool is empty.
+        // In the latter case, already the pointer is NULL.
+        if (!coinbaseScript || coinbaseScript->reserveScript.empty())
+            throw std::runtime_error("No coinbase script available (mining requires a wallet)");
+
+        while (true) {
+            if (chainparams.MiningRequiresPeers()) {
+                // Busy-wait for the network to come online so we don't waste time mining
+                // on an obsolete chain. In regtest mode we expect to fly solo.
+                do {
+                    bool fvNodesEmpty;
+                    {
+                        LOCK(cs_vNodes);
+                        fvNodesEmpty = vNodes.empty();
+                    }
+                    if (!fvNodesEmpty && !IsInitialBlockDownload())
+                        break;
+                    MilliSleep(1000);
+                } while (true);
+            }
+
+            while (pwalletMain->IsLocked())
+            {
+                nLastCoinStakeSearchInterval = 0;
+                MilliSleep(1000);
+            }
+
+            //
+            // Create new block
+            //<
+            uint64_t nFees = 0;
+
+            std::unique_ptr<CBlockTemplate> pblocktemplate(BlockAssembler(Params()).CreateNewBlock(coinbaseScript->reserveScript, true, &nFees));
+            if (!pblocktemplate.get())
+            {
+                LogPrintf("Error in NavCoinStaker: Keypool ran out, please call keypoolrefill before restarting the staking thread\n");
+                return;
+            }
+            CBlock *pblock = &pblocktemplate->block;
+
+            // LogPrint("coinstake","Running NavCoinStaker with %u transactions in block (%u bytes)\n", pblock->vtx.size(),
+            //     ::GetSerializeSize(*pblock, SER_NETWORK, PROTOCOL_VERSION));
+
+            //Trying to sign a block
+            if (SignBlock(pblock, *pwalletMain, nFees))
+            {
+                LogPrintf("PoS Block signed\n");
+                SetThreadPriority(THREAD_PRIORITY_NORMAL);
+                CheckStake(pblock, *pwalletMain, chainparams);
+                SetThreadPriority(THREAD_PRIORITY_LOWEST);
+                MilliSleep(500);
+            }
+            else
+                MilliSleep(nMinerSleep);
+
+        }
+    }
+    catch (const boost::thread_interrupted&)
+    {
+        LogPrintf("NavCoinStaker terminated\n");
+        throw;
+    }
+    catch (const std::runtime_error &e)
+    {
+        LogPrintf("NavCoinStaker runtime error: %s\n", e.what());
+        return;
+    }
+}
+
+void GenerateNavCoins(bool fGenerate, int nThreads, const CChainParams& chainparams)
+{
+    static boost::thread_group* StakerThreads = NULL;
+
+    if (nThreads < 0)
+        nThreads = GetNumCores();
+
+    if (StakerThreads != NULL)
+    {
+        StakerThreads->interrupt_all();
+        delete StakerThreads;
+        StakerThreads = NULL;
+    }
+
+    if (nThreads == 0 || !fGenerate)
+        return;
+
+    StakerThreads = new boost::thread_group();
+    for (int i = 0; i < nThreads; i++)
+        StakerThreads->create_thread(boost::bind(&NavCoinStaker, boost::cref(chainparams)));
+}
+
+#ifdef ENABLE_WALLET
+bool SignBlock(CBlock *pblock, CWallet& wallet, int64_t nFees)
+{
+  std::vector<CTransaction> vtx = pblock->vtx;
+  // if we are trying to sign
+  //    something except proof-of-stake block template
+  if (!vtx[0].vout[0].IsEmpty())
+      return false;
+
+  // if we are trying to sign
+  //    a complete proof-of-stake block
+  if (pblock->IsProofOfStake())
+      return true;
+
+  static int64_t nLastCoinStakeSearchTime = GetAdjustedTime(); // startup timestamp
+
+  CKey key;
+  CTransaction txCoinStake;
+  int nBestHeight = pindexBestHeader->nHeight;
+  txCoinStake.nTime = GetAdjustedTime();
+  txCoinStake.nTime &= ~STAKE_TIMESTAMP_MASK;
+  // txCoinStake.nTime |= 1;
+
+  int64_t nSearchTime = txCoinStake.nTime; // search to current time
+
+  if (nSearchTime > nLastCoinStakeSearchTime)
+  {
+
+      int64_t nSearchInterval = nBestHeight+1 > 0 ? 1 : nSearchTime - nLastCoinStakeSearchTime;
+      if (wallet.CreateCoinStake(wallet, pblock->nBits, nSearchInterval, nFees, txCoinStake, key))
+      {
+
+          if (txCoinStake.nTime >= pindexBestHeader->GetPastTimeLimit()+1)
+          {
+              // make sure coinstake would meet timestamp protocol
+              //    as it would be the same as the block timestamp
+              pblock->vtx[0].nTime = pblock->nTime = txCoinStake.nTime;
+
+              // we have to make sure that we have no future timestamps in
+              //    our transactions set
+              for (vector<CTransaction>::iterator it = vtx.begin(); it != vtx.end();)
+                  if (it->nTime > pblock->nTime) { it = vtx.erase(it); } else { ++it; }
+
+              LogPrintf("Adding CoinStake TX: %s\n",txCoinStake.ToString());
+
+              pblock->vtx.insert(pblock->vtx.begin() + 1, txCoinStake);
+              // pblock->vtx.push_back(txCoinStake);
+
+              pblock->hashMerkleRoot = pblock->BuildMerkleTree();
+
+              bool mutated = false;
+
+              uint256 hashMerkleRoot2 = BlockMerkleRoot(*pblock, &mutated);
+
+              if (pblock->hashMerkleRoot != hashMerkleRoot2)
+                  return error("SignBlock(): Error checking hash merkle root (mutated: %d)\n",mutated);
+
+              return key.SignNav(pblock->GetHash(), pblock->vchBlockSig);
+          }
+      }
+      nLastCoinStakeSearchInterval = nSearchTime - nLastCoinStakeSearchTime;
+      nLastCoinStakeSearchTime = nSearchTime;
+  }
+
+  return false;
+}
+#endif
+
+bool CheckStake(CBlock* pblock, CWallet& wallet, const CChainParams& chainparams)
+{
+    arith_uint256 proofHash = arith_uint256(0), hashTarget = arith_uint256(0);
+    uint256 hashBlock = pblock->GetHash();
+
+    if(!pblock->IsProofOfStake())
+        return error("CheckStake() : %s is not a proof-of-stake block", hashBlock.GetHex());
+
+    // verify hash target and signature of coinstake tx
+    if (!CheckProofOfStake(mapBlockIndex[pblock->hashPrevBlock], pblock->vtx[1], pblock->nBits, proofHash, hashTarget, NULL))
+        return error("CheckStake() : proof-of-stake checking failed");
+
+    //// debug print
+    LogPrintf("CheckStake() : new proof-of-stake block found  \n  hash: %s \nproofhash: %s  \ntarget: %s\n", hashBlock.GetHex(), proofHash.GetHex(), hashTarget.GetHex());
+    LogPrintf("%s\n", pblock->ToString());
+    LogPrintf("out %s\n", FormatMoney(pblock->vtx[1].GetValueOut()));
+
+
+    // Found a solution
+    {
+        LOCK(cs_main);
+        if (pblock->hashPrevBlock != hashBestChain)
+            return error("CheckStake() : generated block is stale");
+
+        // Track how many getdata requests this block gets
+        {
+            LOCK(wallet.cs_wallet);
+            wallet.mapRequestCount[hashBlock] = 0;
+        }
+
+        // GetMainSignals().BlockFound(pblock->GetHash());
+        //
+        // // Process this block the same as if we had received it from another node
+        // CValidationState state;
+        // if (!ProcessNewBlock(state, chainparams, NULL, pblock, true, NULL))
+        //     return error("NavCoinStaker: ProcessNewBlock, block not accepted");
+    }
+
+    return true;
 }

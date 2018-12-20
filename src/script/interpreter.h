@@ -3,8 +3,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#ifndef BITCOIN_SCRIPT_INTERPRETER_H
-#define BITCOIN_SCRIPT_INTERPRETER_H
+#ifndef NAVCOIN_SCRIPT_INTERPRETER_H
+#define NAVCOIN_SCRIPT_INTERPRETER_H
 
 #include "script_error.h"
 #include "primitives/transaction.h"
@@ -18,6 +18,8 @@ class CScript;
 class CTransaction;
 class uint256;
 
+typedef std::vector<unsigned char> valtype;
+
 /** Signature hash types/flags */
 enum
 {
@@ -26,6 +28,37 @@ enum
     SIGHASH_SINGLE = 3,
     SIGHASH_ANYONECANPAY = 0x80,
 };
+
+namespace {
+
+inline bool set_success(ScriptError* ret)
+{
+    if (ret)
+        *ret = SCRIPT_ERR_OK;
+    return true;
+}
+
+inline bool set_error(ScriptError* ret, const ScriptError serror)
+{
+    if (ret)
+        *ret = serror;
+    return false;
+}
+
+} // anon namespace
+
+/**
+ * Script is a stack machine (like Forth) that evaluates a predicate
+ * returning a bool indicating valid or not.  There are no loops.
+ */
+#define stacktop(i)  (stack.at(stack.size()+(i)))
+#define altstacktop(i)  (altstack.at(altstack.size()+(i)))
+static inline void popstack(std::vector<valtype>& stack)
+{
+    if (stack.empty())
+        throw std::runtime_error("popstack(): stack empty");
+    stack.pop_back();
+}
 
 /** Script verification flags */
 enum
@@ -127,6 +160,31 @@ public:
     virtual ~BaseSignatureChecker() {}
 };
 
+class BaseSignatureCheckerNavcoin
+{
+public:
+    virtual bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode) const
+    {
+        return false;
+    }
+
+    virtual ~BaseSignatureCheckerNavcoin() {}
+};
+
+class SignatureCheckerNavcoin : public BaseSignatureCheckerNavcoin
+{
+private:
+    const CTransaction& txTo;
+    unsigned int nIn;
+
+protected:
+    virtual bool VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
+
+public:
+    SignatureCheckerNavcoin(const CTransaction& txToIn, unsigned int nInIn) : txTo(txToIn), nIn(nInIn) {}
+    bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode) const;
+};
+
 class TransactionSignatureChecker : public BaseSignatureChecker
 {
 private:
@@ -154,8 +212,19 @@ public:
 };
 
 bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& script, unsigned int flags, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* error = NULL);
+bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& script, const CTransaction& txTo, unsigned int nIn, unsigned int flags, int nHashType);
+bool EvalScriptNavcoin(std::vector<std::vector<unsigned char> >& stack, const CScript& script, unsigned int flags, const BaseSignatureCheckerNavcoin& checker, ScriptError* error = NULL);
+bool EvalScriptNavcoin(std::vector<std::vector<unsigned char> >& stack, const CScript& script, const CTransaction& txTo, const BaseSignatureCheckerNavcoin& checker, unsigned int nIn, unsigned int flags, int nHashType);
+
+
 bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const CScriptWitness* witness, unsigned int flags, const BaseSignatureChecker& checker, ScriptError* serror = NULL);
+bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsigned int nIn, unsigned int flags, int nHashType);
+bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const CTransaction& txTo, unsigned int nIn, unsigned int flags, int nHashType);
 
 size_t CountWitnessSigOps(const CScript& scriptSig, const CScript& scriptPubKey, const CScriptWitness* witness, unsigned int flags);
 
-#endif // BITCOIN_SCRIPT_INTERPRETER_H
+bool CheckSig(std::vector<unsigned char> vchSig, const std::vector<unsigned char> &vchPubKey, const CScript &scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType, int flags);
+uint256 SignatureHash(CScript scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType);
+bool CastToBool(const valtype& vch);
+
+#endif // NAVCOIN_SCRIPT_INTERPRETER_H

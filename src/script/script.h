@@ -3,11 +3,13 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#ifndef BITCOIN_SCRIPT_SCRIPT_H
-#define BITCOIN_SCRIPT_SCRIPT_H
+#ifndef NAVCOIN_SCRIPT_SCRIPT_H
+#define NAVCOIN_SCRIPT_SCRIPT_H
 
 #include "crypto/common.h"
 #include "prevector.h"
+#include "utilstrencodings.h"
+#include "pubkey.h"
 
 #include <assert.h>
 #include <climits>
@@ -178,7 +180,9 @@ enum opcodetype
     OP_NOP10 = 0xb9,
 
 
+
     // template matching params
+    OP_SMALLDATA = 0xf9,
     OP_SMALLINTEGER = 0xfa,
     OP_PUBKEYS = 0xfb,
     OP_PUBKEYHASH = 0xfd,
@@ -370,6 +374,16 @@ private:
     int64_t m_value;
 };
 
+inline std::string ValueString(const std::vector<unsigned char>& vch)
+{
+    // if (vch.size() <= 4) {
+    //     CScriptNum bn(vch, false);
+    //     return sprintf("%d", bn.getint());
+    // }
+    // else
+        return HexStr(vch);
+}
+
 typedef prevector<28, unsigned char> CScriptBase;
 
 /** Serialized script, used inside transaction inputs and outputs */
@@ -461,6 +475,14 @@ public:
             insert(end(), data, data + sizeof(data));
         }
         insert(end(), b.begin(), b.end());
+        return *this;
+    }
+
+    CScript& operator<<(const CPubKey& key)
+    {
+        assert(key.size() < OP_PUSHDATA1);
+        insert(end(), (unsigned char)key.size());
+        insert(end(), key.begin(), key.end());
         return *this;
     }
 
@@ -605,8 +627,31 @@ public:
         return nFound;
     }
 
+    std::string ToString(bool fShort=false) const
+    {
+        std::string str;
+        opcodetype opcode;
+        std::vector<unsigned char> vch;
+        const_iterator pc = begin();
+        while (pc < end())
+        {
+            if (!str.empty())
+                str += " ";
+            if (!GetOp(pc, opcode, vch))
+            {
+                str += "[error]";
+                return str;
+            }
+            if (0 <= opcode && opcode <= OP_PUSHDATA4)
+                str += fShort? ValueString(vch).substr(0, 10) : ValueString(vch);
+            else
+                str += GetOpName(opcode);
+        }
+        return str;
+    }
+
     /**
-     * Pre-version-0.6, Bitcoin always counted CHECKMULTISIGs
+     * Pre-version-0.6, NavCoin always counted CHECKMULTISIGs
      * as 20 sigops. With pay-to-script-hash, that changed:
      * CHECKMULTISIGs serialized in scriptSigs are
      * counted more accurately, assuming they are of the form
@@ -619,6 +664,8 @@ public:
      * pay-to-script-hash transactions:
      */
     unsigned int GetSigOpCount(const CScript& scriptSig) const;
+
+    bool IsPayToPublicKeyHash() const;
 
     bool IsPayToScriptHash() const;
     bool IsPayToWitnessScriptHash() const;
@@ -668,4 +715,6 @@ public:
     virtual ~CReserveScript() {}
 };
 
-#endif // BITCOIN_SCRIPT_SCRIPT_H
+
+
+#endif // NAVCOIN_SCRIPT_SCRIPT_H

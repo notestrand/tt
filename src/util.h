@@ -7,11 +7,11 @@
  * Server/client environment: argument handling, config file parsing,
  * logging, thread wrappers
  */
-#ifndef BITCOIN_UTIL_H
-#define BITCOIN_UTIL_H
+#ifndef NAVCOIN_UTIL_H
+#define NAVCOIN_UTIL_H
 
 #if defined(HAVE_CONFIG_H)
-#include "config/bitcoin-config.h"
+#include "config/navcoin-config.h"
 #endif
 
 #include "compat.h"
@@ -54,8 +54,8 @@ extern bool fLogIPs;
 extern std::atomic<bool> fReopenDebugLog;
 extern CTranslationInterface translationInterface;
 
-extern const char * const BITCOIN_CONF_FILENAME;
-extern const char * const BITCOIN_PID_FILENAME;
+extern const char * const NAVCOIN_CONF_FILENAME;
+extern const char * const NAVCOIN_PID_FILENAME;
 
 /**
  * Translation function: Call Translate signal on UI interface, which returns a boost::optional result.
@@ -77,17 +77,33 @@ int LogPrintStr(const std::string &str);
 
 #define LogPrintf(...) LogPrint(NULL, __VA_ARGS__)
 
-template<typename... Args>
-static inline int LogPrint(const char* category, const char* fmt, const Args&... args)
+template<typename T1, typename... Args>
+static inline int LogPrint(const char* category, const char* fmt, const T1& v1, const Args&... args)
 {
     if(!LogAcceptCategory(category)) return 0;                            \
-    return LogPrintStr(tfm::format(fmt, args...));
+    return LogPrintStr(tfm::format(fmt, v1, args...));
 }
 
-template<typename... Args>
-bool error(const char* fmt, const Args&... args)
+template<typename T1, typename... Args>
+bool error(const char* fmt, const T1& v1, const Args&... args)
 {
-    LogPrintStr("ERROR: " + tfm::format(fmt, args...) + "\n");
+    LogPrintStr("ERROR: " + tfm::format(fmt, v1, args...) + "\n");
+    return false;
+}
+
+/**
+ * Zero-arg versions of logging and error, these are not covered by
+ * the variadic templates above (and don't take format arguments but
+ * bare strings).
+ */
+static inline int LogPrint(const char* category, const char* s)
+{
+    if(!LogAcceptCategory(category)) return 0;
+    return LogPrintStr(s);
+}
+static inline bool error(const char* s)
+{
+    LogPrintStr(std::string("ERROR: ") + s + "\n");
     return false;
 }
 
@@ -123,6 +139,8 @@ inline bool IsSwitchChar(char c)
     return c == '-';
 #endif
 }
+
+void SetThreadPriority(int nPriority);
 
 /**
  * Return string argument or default value
@@ -200,7 +218,7 @@ void RenameThread(const char* name);
  */
 template <typename Callable> void TraceThread(const char* name,  Callable func)
 {
-    std::string s = strprintf("bitcoin-%s", name);
+    std::string s = strprintf("navcoin-%s", name);
     RenameThread(s.c_str());
     try
     {
@@ -225,4 +243,4 @@ template <typename Callable> void TraceThread(const char* name,  Callable func)
 
 std::string CopyrightHolders(const std::string& strPrefix);
 
-#endif // BITCOIN_UTIL_H
+#endif // NAVCOIN_UTIL_H

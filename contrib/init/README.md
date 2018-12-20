@@ -1,11 +1,11 @@
 Sample configuration files for:
 
-SystemD: bitcoind.service
-Upstart: bitcoind.conf
-OpenRC:  bitcoind.openrc
-         bitcoind.openrcconf
-CentOS:  bitcoind.init
-OS X:    org.bitcoin.bitcoind.plist
+SystemD: navcoind.service
+Upstart: navcoind.conf
+OpenRC:  navcoind.openrc
+         navcoind.openrcconf
+CentOS:  navcoind.init
+OS X:    org.navcoin.navcoind.plist
 
 have been made available to assist packagers in creating node packages here.
 

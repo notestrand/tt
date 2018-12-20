@@ -1,18 +1,21 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
+// Copyright (c) 2017 The NavCoin developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#ifndef BITCOIN_MINER_H
-#define BITCOIN_MINER_H
+#ifndef NAVCOIN_MINER_H
+#define NAVCOIN_MINER_H
 
 #include "primitives/block.h"
 #include "txmempool.h"
+#include "pos.h"
 
 #include <stdint.h>
 #include <memory>
 #include "boost/multi_index_container.hpp"
 #include "boost/multi_index/ordered_index.hpp"
+#include "wallet/wallet.h"
 
 class CBlockIndex;
 class CChainParams;
@@ -23,6 +26,7 @@ class CWallet;
 namespace Consensus { struct Params; };
 
 static const bool DEFAULT_PRINTPRIORITY = false;
+static const int DEFAULT_GENERATE_THREADS = 1;
 
 struct CBlockTemplate
 {
@@ -164,7 +168,7 @@ private:
 public:
     BlockAssembler(const CChainParams& chainparams);
     /** Construct a new block template with coinbase to scriptPubKeyIn */
-    CBlockTemplate* CreateNewBlock(const CScript& scriptPubKeyIn);
+    CBlockTemplate* CreateNewBlock(const CScript& scriptPubKeyIn, bool fProofOfStake, uint64_t* pFees);
 
 private:
     // utility functions
@@ -175,7 +179,7 @@ private:
 
     // Methods for how to add transactions to a block.
     /** Add transactions based on tx "priority" */
-    void addPriorityTxs();
+    void addPriorityTxs(bool fProofOfStake, int blockTime);
     /** Add transactions based on feerate including unconfirmed ancestors */
     void addPackageTxs();
 
@@ -209,4 +213,10 @@ private:
 void IncrementExtraNonce(CBlock* pblock, const CBlockIndex* pindexPrev, unsigned int& nExtraNonce);
 int64_t UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, const CBlockIndex* pindexPrev);
 
-#endif // BITCOIN_MINER_H
+// NAVCoin - Mining/Staking thread
+void GenerateNavCoins(bool fGenerate, int nThreads, const CChainParams& chainparams);
+bool SignBlock(CBlock *pblock, CWallet& wallet, int64_t nFees);
+/** Check mined proof-of-stake block */
+bool CheckStake(CBlock* pblock, CWallet& wallet, const CChainParams& chainparams);
+
+#endif // NAVCOIN_MINER_H
